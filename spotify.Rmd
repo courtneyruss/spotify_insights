@@ -1,0 +1,563 @@
+---
+title: "Spotify Insights"
+author: "Courtney Russ"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+This is an analysis of my entire spotify streaming history (2015 - 2023). <br>
+I downloaded my entire Spotify streaming history [here](https://www.spotify.com/ca-en/account/privacy/) and used the [Spotify Web API](https://developer.spotify.com/documentation/web-api) to extract further information.
+<br>
+
+### Loading Packages
+```{r packages, result=FALSE, message=FALSE}
+library(jsonlite)
+library(dplyr)
+library(skimr)
+library(httr)
+library(purrr)
+library(ggplot2)
+library(keyring)
+library(lubridate)
+library(stringr)
+library(patchwork)
+```
+<br>
+
+### Loading Data
+```{r Loading, warning=FALSE, }
+json_files <- c("Spotify1.json", "Spotify2.json", "Spotify3.json", 
+                "Spotify4.json", "Spotify5.json", "Spotify6.json")
+
+load_df <- purrr::map_dfr(json_files, ~fromJSON(.))
+skim(load_df)
+```
+<br>
+
+### Cleaning Data
+
+Songs played have a value for master_metadata_track_name and no value for episode_name, and the opposite is true for podcasts played. I'll use this to separate music and podcasts into separate dataframes. I'll also filter out songs and podcasts that had 0 ms played. 
+```{r cleaning}
+music_df <- load_df %>%
+  filter(is.na(episode_name)) %>%
+  filter(!is.na(master_metadata_track_name)) %>%
+  filter(ms_played != 0) %>%
+  select(ts, ms_played, master_metadata_track_name, master_metadata_album_album_name, 
+         master_metadata_album_artist_name, spotify_track_uri) %>%
+  filter(!is.na(master_metadata_track_name)) %>%
+  mutate(id = stringr::str_replace(spotify_track_uri, "spotify:track:", "")) %>%
+  select(-spotify_track_uri) %>%
+  rename(track_name = master_metadata_track_name,
+         album_name = master_metadata_album_album_name,
+         artist = master_metadata_album_artist_name)
+
+podcast_df <- load_df %>%
+  filter(!is.na(episode_name)) %>%
+  select(ts, platform, ms_played, episode_name, episode_show_name) %>%
+  rename(show_name = episode_show_name)
+
+print(paste("First day using Spotify:", min(as.Date(load_df$ts))))
+```
+
+```{r remove vars 1, include=FALSE}
+rm(list = setdiff(ls(), c("music_df", "podcast_df")))
+```
+<br>
+
+### Hours listened by year
+```{r Hours Per Year}
+music_hours <- music_df %>%
+  mutate(year = lubridate::year(ts)) %>% 
+  group_by(year) %>%
+  summarize(total_hours_played = sum(ms_played, na.rm = TRUE) / (1000 * 60 * 60))
+
+podcast_hours <- podcast_df %>%
+  mutate(year = lubridate::year(ts)) %>% 
+  group_by(year) %>%
+  summarize(total_hours_played = sum(ms_played, na.rm = TRUE) / (1000 * 60 * 60))
+
+total_hours <- bind_rows(
+  mutate(music_hours, category = "Music"),
+  mutate(podcast_hours, category = "Podcast"))
+
+ggplot(total_hours, aes(x = factor(year), y = total_hours_played, 
+                        fill = factor(category, levels = c("Podcast", "Music")))) +
+  geom_bar(stat = "identity", color = "black") +
+  scale_fill_manual(values = c("#1DB954", "black")) +
+  labs(title = "Total Hours Played on Spotify per Year",
+       y = "Total Hours Played",
+       fill = "Category") +
+  scale_x_discrete(labels = unique(total_hours$year)) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(), axis.ticks.x = element_blank())
+
+```
+
+We can see my listening drastically increases in 2021. This is the first full year I worked an office job in which I listened to music for a lot of the day. I also started using Spotify as my main podcast app in 2021 - you can see I briefly tried it in 2018 too! 
+
+Let's look at how much of my overall listening was in 2021-2023. 
+
+```{r hours pre/post 2021}
+
+total_hours %>%
+  mutate(year_group = case_when(
+    between(year, 2015, 2020) ~ "2015-2020",
+    between(year, 2021, 2023) ~ "2021-2023",
+    TRUE ~ "Other")) %>%
+  group_by(year_group) %>%
+  summarise(total_hours = round(sum(total_hours_played))) %>%
+  mutate(percentage = round(total_hours / sum(total_hours) * 100, 1)) %>%
+  knitr::kable(caption = "Listening Hours - Overall")
+
+
+total_hours %>%
+  filter(category == "Music") %>%
+  mutate(year_group = case_when(
+    between(year, 2015, 2020) ~ "2015-2020",
+    between(year, 2021, 2023) ~ "2021-2023",
+    TRUE ~ "Other")) %>%
+  group_by(year_group) %>%
+  summarise(total_hours = round(sum(total_hours_played))) %>%
+  mutate(percentage = round(total_hours / sum(total_hours) * 100, 1)) %>%
+  knitr::kable(caption = "Listening Hours - Music")
+
+total_hours %>%
+  filter(category == "Podcast") %>%
+  mutate(year_group = case_when(
+    between(year, 2015, 2020) ~ "2015-2020",
+    between(year, 2021, 2023) ~ "2021-2023",
+    TRUE ~ "Other")) %>%
+  group_by(year_group) %>%
+  summarise(total_hours = round(sum(total_hours_played))) %>%
+  mutate(percentage = round(total_hours / sum(total_hours) * 100, 1)) %>%
+  knitr::kable(caption = "Listening Hours - Podcasts")
+
+```
+
+More than 80% of my listening hours were in 2021 - 2023. Almost 90% of podcast hours and 61% of music hours were in the same time period. 
+
+```{r remove vars 2, include=FALSE}
+rm(list = setdiff(ls(), c("music_df", "podcast_df")))
+```
+<br>
+
+### Days Listened
+Here I'm comparing the number of days I listened to any content (music or podcast) on Spotify vs days I didn't use it at all. The music_df and podcast_df dataframes only have days with listening in them, so I got the max and min dates from music_df and created a single-column dataframe with all dates in between. 
+```{r, Days Listened, message=FALSE}
+
+# Minutes of music played per day
+music_day <- music_df %>%
+  mutate(day = lubridate::date(ts)) %>% 
+  group_by(day) %>%
+  summarise(total_mins_played = round(sum(ms_played, na.rm = TRUE) / (1000 * 60))) 
+
+# Get all dates 
+all_dates <- seq(min(music_day$day), max(music_day$day), by = "days")
+all_dates_df <- data.frame(day = all_dates)
+
+# Join with all dates dataframe to get '0' for days where nothing was recorded
+music_day <- full_join(all_dates_df, music_day, by = "day")
+
+# Replace NAs with 0
+music_day <- music_day %>%
+  mutate(total_mins_played = ifelse(is.na(total_mins_played), 0, total_mins_played))
+
+# All the same for podcasts
+podcast_day <- podcast_df %>%
+  mutate(day = lubridate::date(ts)) %>%
+  group_by(day) %>%
+  summarise(total_mins_played = round(sum(ms_played, na.rm = TRUE) / (1000 * 60)))
+
+podcast_day <- full_join(all_dates_df, podcast_day, by="day")
+
+podcast_day <- podcast_day %>%
+  mutate(total_mins_played = ifelse(is.na(total_mins_played), 0, total_mins_played))
+
+combined_day <- bind_rows(
+  mutate(music_day, listening_type = "Music"),
+  mutate(podcast_day, listening_type = "Podcasts"))
+
+p1 <- combined_day %>%
+  group_by(listening_type, 
+           has_listening = ifelse(total_mins_played > 0, "Some Listening", "No Listening")) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = has_listening, 
+             y = count, 
+             fill = has_listening)) +
+  scale_fill_manual(values = c("Black", "#1DB954")) + 
+  geom_bar(stat = "identity") +
+  facet_wrap(~listening_type) +
+  labs(title = "Days Listening - All Time",
+       y = "Days") +
+  theme_minimal() +
+  theme(legend.position = "None", 
+        axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+In the graph of total hours listened per year I found that there was much more listening from 2021 onwards. I filtered the days listened data for the last three years to see if this looked different to my overall listening.
+
+```{r 3 Year Days Listened, message=FALSE}
+# Filter for last 3 years
+p2 <- combined_day %>%
+  filter(lubridate::year(day) %in% c(2021, 2022, 2023)) %>%
+  group_by(listening_type, 
+           has_listening = ifelse(total_mins_played > 0, "Some Listening", "No Listening")) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = has_listening, 
+             y = count, 
+             fill = has_listening)) +
+  scale_fill_manual(values = c("Black", "#1DB954")) + 
+  geom_bar(stat = "identity") +
+  facet_wrap(~listening_type) +
+  labs(title = "Days Listening - 2021 to 2023",
+       y = "Days") +
+  theme_minimal() +
+  theme(legend.position = "None", 
+        axis.title.x = element_blank(), 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+p1|p2
+```
+
+There are far fewer days with no listening in 2021 - 2023 which makes sense given the increase in listening over this time period. This is especially true for podcasts which again makes sense as the majority of my all-time listening was from 2021 onwards.
+
+```{r remove vars 3, include=FALSE}
+rm(list = setdiff(ls(), c("music_df", "podcast_df")))
+```
+<br>
+
+### Top Artists 
+```{r}
+# Top artists - all time
+music_df %>%
+  group_by(artist) %>%
+  summarize(total_hours_played = sum(ms_played, na.rm = TRUE) / (1000 * 60 * 60)) %>%
+  ungroup() %>%
+  top_n(10, wt = total_hours_played) %>%
+  arrange(desc(total_hours_played)) %>%
+  ggplot(aes(x = reorder(artist, -total_hours_played), 
+             y = total_hours_played)) +
+  geom_bar(stat = "identity", 
+           fill = "#1DB954", 
+           color = "black") +
+  labs(title = "All Time Artist Hours Played on Spotify",
+       y = "Total Hours Played") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.title.x = element_blank())
+```
+
+I also tried filtering my top artists for 2021 onwards and pre-2021. I would expect my overall music listening to most closely resemble the data for 2021 - 2023 as this time period accounts for >60% of music hours.
+
+```{R top artists filtered}
+
+# Top Artists - 2021 to 2023
+music_df %>%
+  mutate(ts = ymd_hms(ts)) %>%
+  filter(year(ts) %in% c(2021, 2022, 2023)) %>%
+  group_by(artist) %>%
+  summarize(total_hours_played = sum(ms_played, na.rm = TRUE) / (1000 * 60 * 60)) %>%
+  ungroup() %>%
+  top_n(10, wt = total_hours_played) %>%
+  arrange(desc(total_hours_played)) %>%
+  ggplot(aes(x = reorder(artist, -total_hours_played), 
+             y = total_hours_played)) +
+  geom_bar(stat = "identity", 
+           fill = "#1DB954", 
+           color = "black") +
+  labs(title = "Artist Hours Played on Spotify - 2021 to 2023",
+       y = "Total Hours Played") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.title.x = element_blank())
+
+# Top Artists - pre-2021
+music_df %>%
+  mutate(ts = ymd_hms(ts)) %>%
+  filter(!year(ts) %in% c(2021, 2022, 2023)) %>%
+  group_by(artist) %>%
+  summarize(total_hours_played = sum(ms_played, na.rm = TRUE) / (1000 * 60 * 60)) %>%
+  ungroup() %>%
+  top_n(10, wt = total_hours_played) %>%
+  arrange(desc(total_hours_played)) %>%
+  ggplot(aes(x = reorder(artist, -total_hours_played), 
+             y = total_hours_played)) +
+  geom_bar(stat = "identity", 
+           fill = "#1DB954", 
+           color = "black") +
+  labs(title = "Artist Hours Played on Spotify - 2015-2020",
+       y = "Total Hours Played") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.title.x = element_blank())
+
+```
+
+My top artists pre-2021 is significantly different to my overall and 2021 onward top artists. Most noteably my top 2 artists overall, Qveen Herby and Taylor Swift, are at positions 8 and 10 respectively.
+<br>
+
+### Rank of Top 5 Artists Over Time
+Here I tracked the rank over time of my top 5 all-time artists.
+```{r, Top 5 Artists, warning=FALSE, message=FALSE}
+
+# Get top 5 artists of all time
+top_5_artists <- music_df %>%
+  mutate(year = lubridate::year(ts)) %>% 
+  group_by(artist, ) %>%
+  summarize(total_hours_played = sum(ms_played, na.rm = TRUE) / (1000 * 60 * 60)) %>%
+  arrange(desc(total_hours_played)) %>%
+  top_n(5, wt = total_hours_played)
+
+ranking <- music_df %>%
+  mutate(year = lubridate::year(ts)) %>%
+  group_by(year, artist) %>%
+  summarise(hours_played = sum(ms_played, na.rm=TRUE) / (1000 * 60 * 60)) %>%
+  mutate(rank = row_number(desc(hours_played))) %>%
+  ungroup() %>%
+  filter(artist %in% as.list(top_5_artists$artist))
+
+ggplot(ranking, aes(x = year, 
+                    y = rank, 
+                    color = artist)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Top 5 Artists Over Time",
+       y = "Rank") +
+  theme_minimal() +
+scale_y_reverse(breaks = seq(0, max(ranking$rank), by = 10)) +
+scale_x_continuous(breaks = unique(ranking$year)) +
+  theme(axis.title.x = element_blank(),
+        panel.grid.minor = element_blank())
+
+```
+
+We can see that Taylor Swift has a huge range of rankings over time!
+
+```{r Taylor Swift Ranking}
+ranking %>%
+  filter(artist == "Taylor Swift") %>%
+  mutate(Lowest_Ranking = max(rank),
+         Highest_Ranking = min(rank)) %>%
+  select(artist, Lowest_Ranking, Highest_Ranking) %>%
+  slice_head(n=1)
+```
+
+To make the plots easier to interpret, I'll separate Taylor Swift from the other 4 artists.
+
+```{r ranking artists, message=FALSE, warning=FALSE}
+
+ranking_ts <- ranking %>%
+  filter(artist == "Taylor Swift")
+
+ggplot(ranking_ts, aes(x = year, 
+                       y = rank, 
+                       color = artist)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Taylor Swift Rank Over Time",
+       y = "Rank") +
+  scale_y_reverse() +
+  theme(legend.position = "none", 
+        axis.title.x = element_blank()) +
+  theme_minimal() +
+  scale_y_reverse(breaks = seq(0, max(ranking$rank), by = 10)) +
+  scale_x_continuous(breaks = unique(ranking$year)) +
+  theme(axis.title.x = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(color = FALSE)
+
+ranking_filtered <- ranking %>%
+  filter(!artist == "Taylor Swift")
+
+ggplot(ranking_filtered, aes(x = year, 
+                             y = rank,
+                             color = artist)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Top Artists Rank Over Time - Excluding Taylor Swift",
+       y = "Rank") +
+  theme_minimal() +
+  scale_y_reverse(breaks = seq(0, max(ranking$rank), by = 10)) +
+  scale_x_continuous(breaks = unique(ranking$year)) +
+  theme(axis.title.x = element_blank(),
+        panel.grid.minor = element_blank())
+
+
+```
+
+
+The lowest ranking any of the other 4 top artists got was Lily Allen at 30th most listened in 2021.  
+
+
+```{r remove vars 4, include=FALSE}
+rm(list = setdiff(ls(), c("music_df", "podcast_df")))
+```
+
+<br>
+
+### Top 50 Tracks
+Here I'm using the Spotify Web API to get information about Spotify's popularity rating and explicit-content status of my top 50 songs.
+```{r Top 50 Tracks, message=FALSE, warning=FALSE}
+# Top 50 tracks
+top_songs <- music_df %>%
+  group_by(track_name, id, artist) %>%
+  summarize(total_plays = n()) %>%
+  ungroup() %>%
+  top_n(50, wt = total_plays) %>%
+  arrange(desc(total_plays)) 
+
+# Get track IDs
+track_ids <- top_songs$id
+
+# Function to get Spotify access token
+get_spotify_token <- function(client_id, client_secret) {
+  url <- "https://accounts.spotify.com/api/token"
+  
+  body <- list(
+    grant_type = "client_credentials",
+    client_id = client_id,
+    client_secret = client_secret)
+  
+  response <- POST(
+    url,
+    body = body,
+    encode = "form",
+    add_headers("Content-Type" = "application/x-www-form-urlencoded"))
+  
+  # Check for a successful response 
+  if (status_code(response) == 200) {
+    # Extract and return the access token
+    content <- fromJSON(rawToChar(response$content))
+    if ("access_token" %in% names(content)) {
+      return(content$access_token)
+    } else {
+      stop("Access token not found in the response.")
+    }
+  } else {
+    # Handle the error
+    stop(paste("Error:", status_code(response)))
+  }
+}
+
+# Spotify API credentials
+client_id <- keyring::key_get("spotify_api", "client_id")
+client_secret <- keyring::key_get("spotify_api", "client_secret")
+
+# Get  access token
+access_token <- get_spotify_token(client_id, client_secret)
+
+# Spotify API endpoint for tracks
+endpoint <- "https://api.spotify.com/v1/tracks"
+
+# Construct the URL 
+url <- paste0(endpoint, "?ids=", paste(track_ids, collapse = ","))
+
+# Make the GET request
+response <- httr::GET(url, httr::add_headers(Authorization = paste("Bearer", access_token)))
+
+# Check for a successful response (status code 200)
+if (httr::status_code(response) == 200) {
+  # Extract the track information without printing
+  track_info <- httr::content(response, "parsed")}
+
+json_data <- toJSON(track_info, auto_unbox = TRUE, flatten=TRUE)
+track_info_df <- as.data.frame(fromJSON(json_data)) 
+
+top_50_tracks <- track_info %>%
+  purrr::pluck("tracks") %>%
+  purrr::map_df(~data.frame(
+    id = as.character(purrr::pluck(.x, "id")),
+    popularity = as.numeric(purrr::pluck(.x, "popularity")),
+    explicit = as.logical(purrr::pluck(.x, "explicit"))))
+
+top_50_tracks_join <- top_50_tracks %>% 
+  right_join(top_songs, by = "id")
+
+ggplot(top_50_tracks_join, aes(x = popularity)) +
+  geom_histogram(binwidth = 10, 
+                 fill = "#1DB954", 
+                 color = "black") +
+  labs(title = "Popularity of Top 50 Tracks")
+
+explicit_counts <- top_50_tracks %>%
+  count(explicit) %>%
+  mutate(percentage = n / sum(n) * 100)
+
+ggplot(explicit_counts, aes(x = "", y = n, fill = factor(explicit))) +
+  geom_bar(stat = "identity", 
+           width = 1) +
+  geom_text(aes(label = ifelse(explicit, paste0("Explicit\n", round(percentage, 1), "%"), 
+                              paste0("Not Explicit\n", round(percentage, 1), "%"))),
+            position = position_stack(vjust = 0.5), color = "white") +
+  coord_polar("y") +
+  labs(title = "Proportion of Explicit Songs",
+       y = "") +
+  scale_fill_manual(values = c("FALSE" = "black", "TRUE" = "#1DB954"), 
+                    labels = c("FALSE" = "Not Explicit", "TRUE" = "Explicit")) +
+  theme_minimal() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5))
+```
+
+```{r, include=FALSE}
+
+rm(list = setdiff(ls(), c("music_df", "podcast_df")))
+
+```
+<br>
+
+### Top Podcasts
+```{r top podcasts}
+
+top_podcasts <- podcast_df %>%
+  group_by(show_name) %>%
+  summarise(total_hours_played = round(sum(ms_played, na.rm = TRUE) / (1000 * 60 * 60))) %>%
+  top_n(5, wt = total_hours_played) %>%
+  arrange(desc(total_hours_played)) %>%
+  mutate(show_name = str_replace(show_name, "Sawbones: A Marital Tour of Misguided Medicine", "Sawbones")) %>%
+  mutate(total_hours_played = as.numeric(total_hours_played),
+         show_name = factor(show_name, levels = show_name[order(-total_hours_played)]))
+
+ggplot(top_podcasts, aes(x = show_name, y = total_hours_played)) +
+  geom_col(fill = "#1DB954", color = "black") +
+  labs(title = "Total Hours Played by Podcast",
+       y = "Total Hours Played") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        axis.title.x = element_blank())
+
+
+top_podcasts
+```
+
+I spent more than three times as much times listening to Let's Go To Court! than my second most listened podcast. Next I'm going to see what episodes of Let's Go To Court! that I re-listened to the most. I filtered for records where I listened to more than 15 minutes (900000ms) and kept only one record per episode per day, as pausing and then restarting the same podcaster later on the same day would otherwise be counted twice. 
+
+```{r replayed podcasts, fig.width = 12, fig.height=4}
+
+# Most replayed episodes
+lgtc <- podcast_df %>%
+  filter(show_name == "Let's Go To Court!") %>%
+  filter(ms_played >= 900000) %>%
+  mutate(day = as.Date(ts)) %>%
+  select(episode_name, day) %>%
+  distinct() %>%
+  group_by(episode_name) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  top_n(5, wt = count) 
+  
+
+ggplot(lgtc, aes(x=episode_name, y=count)) +
+  geom_col(fill = "#1DB954", color = "black") +
+  labs(title = "Most Replayed Episodes of Let's Go To Court!",
+       y = "Times Played") +
+  theme(axis.title.y = element_blank()) +
+  coord_flip()
+
+```
